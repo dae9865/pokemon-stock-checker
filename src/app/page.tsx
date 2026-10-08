@@ -144,11 +144,36 @@ export default function Home() {
     async (regionSlug: string) => {
       setLoading(true);
       setRegion(regionSlug);
+      setResults([]); // 편의점이 끝나는 대로 하나씩 채워나간다 — 전부 끝날 때까지 안 기다린다.
       try {
         const kw = keyword.trim();
         const res = await fetch(`/api/stock?region=${regionSlug}${kw ? `&keyword=${encodeURIComponent(kw)}` : ""}`);
-        const data = await res.json();
-        setResults(data.results ?? null);
+        if (!res.body) throw new Error("스트림을 열 수 없어요");
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() ?? ""; // 아직 안 끝난 마지막 줄은 다음 청크랑 합치려고 남겨둔다.
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            const msg = JSON.parse(line) as { type: string } & Partial<BrandResult>;
+            if (msg.type === "result" && msg.brand) {
+              const entry = msg as BrandResult;
+              setResults((prev) => {
+                const cur = prev ?? [];
+                const idx = cur.findIndex((r) => r.brand === entry.brand);
+                const next = [...cur];
+                if (idx >= 0) next[idx] = entry;
+                else next.push(entry);
+                return next;
+              });
+            }
+          }
+        }
         setLastFetchedAt(Date.now());
       } catch {
         setResults(null);
@@ -315,13 +340,17 @@ export default function Home() {
               {ALL_BRANDS.map((b) => {
                 const stat = brandStats.get(b)!;
                 const errored = errors.some((e) => e.brand === b);
+                const arrived = (results ?? []).some((r) => r.brand === b);
+                const pending = loading && !arrived;
                 return (
                   <div key={b} className="bg-zinc-900 rounded-2xl border border-zinc-800 p-3.5">
                     <div className="flex items-center gap-1.5">
-                      <span className={`w-2 h-2 rounded-full ${BRAND_DOT[b]}`} />
+                      <span className={`w-2 h-2 rounded-full ${BRAND_DOT[b]} ${pending ? "animate-pulse" : ""}`} />
                       <span className="text-xs font-semibold text-zinc-400">{BRAND_LABEL[b]}</span>
                     </div>
-                    {errored ? (
+                    {pending ? (
+                      <p className="text-xs text-zinc-600 mt-2 animate-pulse">조회 중...</p>
+                    ) : errored ? (
                       <p className="text-xs text-zinc-600 mt-2">조회 실패</p>
                     ) : stat.storeCount === 0 && stat.unknownCount > 0 ? (
                       <>

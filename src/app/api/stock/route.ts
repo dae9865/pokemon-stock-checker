@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest } from "next/server";
 import * as gs25 from "@/lib/gs25";
 import * as cu from "@/lib/cu";
 import * as seveneleven from "@/lib/seveneleven";
@@ -31,18 +31,33 @@ export async function GET(req: NextRequest) {
     { brand: "emart24", run: () => emart24.findNearbyStock(keywordFor("emart24"), region) },
   ];
 
-  const settled = await Promise.allSettled(tasks.map((t) => t.run()));
+  // 4개 편의점을 다 모을 때까지 기다리지 않고, 각 편의점이 끝나는 대로 한 줄씩(NDJSON) 바로
+  // 흘려보낸다 — 제일 느린 편의점(보통 이마트24) 때문에 화면 전체가 멈춰 보이는 걸 막는다.
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    async start(controller) {
+      controller.enqueue(
+        encoder.encode(JSON.stringify({ type: "meta", keyword: customKeyword || null, region: region.slug }) + "\n")
+      );
+      await Promise.all(
+        tasks.map(async (t) => {
+          let result: BrandResult;
+          try {
+            const r = await t.run();
+            const stores = await withChangeTimestamps(r.stores);
+            result = { brand: t.brand, ok: true, stores, stale: r.stale };
+          } catch (err) {
+            const e = err as { message?: string } | undefined;
+            result = { brand: t.brand, ok: false, error: e?.message ?? String(err), stores: [] };
+          }
+          controller.enqueue(encoder.encode(JSON.stringify({ type: "result", ...result }) + "\n"));
+        })
+      );
+      controller.close();
+    },
+  });
 
-  const results: BrandResult[] = await Promise.all(
-    settled.map(async (r, i) => {
-      const brand = tasks[i].brand;
-      if (r.status === "fulfilled") {
-        const stores = await withChangeTimestamps(r.value.stores);
-        return { brand, ok: true, stores, stale: r.value.stale };
-      }
-      return { brand, ok: false, error: r.reason?.message ?? String(r.reason), stores: [] };
-    })
-  );
-
-  return NextResponse.json({ keyword: customKeyword || null, region: region.slug, results });
+  return new Response(stream, {
+    headers: { "Content-Type": "application/x-ndjson; charset=utf-8" },
+  });
 }
